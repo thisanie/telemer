@@ -1,0 +1,21 @@
+{
+  "name": "telemer-realtime-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "predev": "node scripts/copy-vad-assets.js",
+    "dev": "vite",
+    "prebuild": "node scripts/copy-vad-assets.js",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ricky0123/vad-web": "^0.0.31",
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {}
+}

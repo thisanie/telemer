@@ -1,0 +1,13 @@
+streamlit
+fastapi
+python-multipart
+uvicorn[standard]
+google-genai
+pydantic
+kokoro
+transformers
+accelerate
+torch
+torchvision
+soundfile
+scipy
