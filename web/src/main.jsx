@@ -9,6 +9,8 @@ function App() {
   const recognitionRef = useRef(null)
   const sentTranscriptRef = useRef(false)
   const latestInterimRef = useRef('')
+  const recognitionErrorRef = useRef(false)
+  const transcriptPendingRef = useRef(false)
   const [connection, setConnection] = useState('connecting')
   const [question, setQuestion] = useState(null)
   const [interim, setInterim] = useState('')
@@ -21,19 +23,28 @@ function App() {
   const [showFallback, setShowFallback] = useState(false)
 
   useEffect(() => {
+    let mounted = true
     const socket = new WebSocket(SOCKET_URL)
     socketRef.current = socket
     socket.onopen = () => setConnection('online')
-    socket.onclose = () => setConnection('offline')
+    socket.onclose = () => {
+      if (!mounted) return
+      setConnection('offline')
+      void stopListening()
+    }
     socket.onerror = () => setConnection('offline')
     socket.onmessage = (event) => {
       const message = JSON.parse(event.data)
       if (message.type === 'question') {
+        sentTranscriptRef.current = false
+        latestInterimRef.current = ''
+        transcriptPendingRef.current = false
         setQuestion(message.question)
         setStatus('Listening for your answer')
         speak(message.question.spokenText)
       }
       if (message.type === 'answer.processed') {
+        transcriptPendingRef.current = false
         setTurns((previous) => [...previous, message])
         setTranscript('')
         setInterim('')
@@ -41,11 +52,16 @@ function App() {
       }
       if (message.type === 'call.ended') {
         setEnded(true)
+        recognitionRef.current?.stop()
         setListening(false)
         setStatus(message.status === 'complete' ? 'Call complete' : 'Call transferred')
       }
     }
-    return () => socket.close()
+    return () => {
+      mounted = false
+      recognitionRef.current?.stop()
+      socket.close()
+    }
   }, [])
 
   function speak(text) {
@@ -59,68 +75,105 @@ function App() {
   }
 
   function startListening() {
+    if (listening || transcriptPendingRef.current || ended) return
+
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!Recognition) {
       setShowFallback(true)
-      setStatus('Use Chrome or Edge for live browser transcription')
+      setStatus('Speech recognition is not supported in this browser. Type your response instead.')
       return
     }
+
     const recognition = new Recognition()
     recognition.lang = 'hi-IN'
     recognition.continuous = false
     recognition.interimResults = true
     sentTranscriptRef.current = false
     latestInterimRef.current = ''
-    recognition.onstart = () => { setListening(true); setStatus('Listening...') }
+    recognitionErrorRef.current = false
+    setInterim('')
+    setTranscript('')
+    setShowFallback(false)
+    setListening(true)
+    setStatus('Listening...')
     recognition.onresult = (event) => {
-      let interimText = ''
       let finalText = ''
+      let interimText = ''
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const text = event.results[index][0].transcript
-        if (event.results[index].isFinal) finalText += text
-        else interimText += text
+        const result = event.results[index]
+        if (result.isFinal) finalText += result[0].transcript
+        else interimText += result[0].transcript
       }
-      setInterim(interimText)
-      latestInterimRef.current = interimText
-      if (finalText) {
-        sendTranscript(finalText.trim())
-      }
+      const text = (finalText || interimText).trim()
+      latestInterimRef.current = text
+      setInterim(text)
+      if (finalText.trim()) sendTranscript(finalText.trim())
     }
     recognition.onerror = (event) => {
+      recognitionErrorRef.current = true
       setListening(false)
-      setShowFallback(true)
-      setStatus(`Microphone error: ${event.error}. Use the fallback below.`)
+      if (event.error === 'no-speech') {
+        setStatus('No speech detected. Select Start speaking to try again.')
+      } else {
+        setShowFallback(true)
+        setStatus(`Speech recognition failed (${event.error}). Type your response instead.`)
+      }
     }
     recognition.onend = () => {
+      if (recognitionRef.current === recognition) recognitionRef.current = null
       setListening(false)
-      if (!sentTranscriptRef.current) sendTranscript(latestInterimRef.current.trim())
+      if (!recognitionErrorRef.current && !sentTranscriptRef.current) {
+        const text = latestInterimRef.current.trim()
+        if (text) sendTranscript(text)
+        else setStatus('No speech detected. Select Start speaking to try again.')
+      }
     }
     recognitionRef.current = recognition
-    recognition.start()
+    try {
+      recognition.start()
+    } catch (error) {
+      recognitionRef.current = null
+      setListening(false)
+      setShowFallback(true)
+      setStatus('Could not start speech recognition. Type your response instead.')
+      console.error('Could not start browser speech recognition', error)
+    }
+  }
+
+  function stopListening() {
+    recognitionRef.current?.stop()
+    setListening(false)
   }
 
   function sendTranscript(text) {
-    if (!text || sentTranscriptRef.current || socketRef.current?.readyState !== WebSocket.OPEN) return
+    if (
+      !text ||
+      transcriptPendingRef.current ||
+      sentTranscriptRef.current ||
+      socketRef.current?.readyState !== WebSocket.OPEN
+    ) return
     sentTranscriptRef.current = true
+    transcriptPendingRef.current = true
     setTranscript(text)
     setInterim('')
     setStatus('Processing response...')
     socketRef.current.send(JSON.stringify({ type: 'transcript.final', text }))
   }
 
-  function stopListening() {
-    recognitionRef.current?.stop()
-    setListening(false)
-    setStatus('Paused')
-  }
-
   function resetCall() {
+    recognitionRef.current?.stop()
+    recognitionRef.current = null
+    sentTranscriptRef.current = false
+    latestInterimRef.current = ''
+    recognitionErrorRef.current = false
+    transcriptPendingRef.current = false
     setTurns([])
     setTranscript('')
     setInterim('')
     setEnded(false)
     setManualText('')
     setShowFallback(false)
+    setListening(false)
     setStatus('Starting a new call')
     socketRef.current?.send(JSON.stringify({ type: 'reset' }))
   }
@@ -173,16 +226,16 @@ function App() {
             </div>
           </div>
           <div className="controls">
-            <button className={`talk-button ${listening ? 'active' : ''}`} onClick={listening ? stopListening : startListening} disabled={ended || connection !== 'online'}>
-              <span className="button-icon">{listening ? '■' : '●'}</span>{listening ? 'Stop listening' : 'Start speaking'}
+              <button className={`talk-button ${listening ? 'active' : ''}`} onClick={listening ? stopListening : startListening} disabled={ended || connection !== 'online' || transcriptPendingRef.current}>
+                <span className="button-icon">{listening ? '■' : '●'}</span>{listening ? 'Stop listening' : 'Start speaking'}
             </button>
             <button className="reset-button" onClick={resetCall}>Reset call</button>
           </div>
           {showFallback && <form className="fallback-form" onSubmit={submitManualText}>
-            <input value={manualText} onChange={(event) => setManualText(event.target.value)} placeholder="Browser speech is unavailable. Type a test response..." aria-label="Fallback response" />
+            <input value={manualText} onChange={(event) => setManualText(event.target.value)} placeholder="Microphone unavailable. Type a test response..." aria-label="Fallback response" />
             <button type="submit" disabled={!manualText.trim()}>Send</button>
           </form>}
-          <div className="privacy-note"><span>⌁</span> No audio is stored in this browser demo</div>
+          <div className="privacy-note"><span>⌁</span> Browser speech recognition may use an online service. This app receives text only and does not save audio.</div>
         </div>
         <aside className="timeline">
           <div className="panel-head"><span>CALL THREAD</span><span>{turns.length.toString().padStart(2, '0')} TURNS</span></div>

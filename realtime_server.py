@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import uuid
@@ -159,6 +160,56 @@ async def send_question(socket: WebSocket, questionnaire: Questionnaire, state: 
     )
 
 
+async def process_transcript(
+    socket: WebSocket,
+    questionnaire: Questionnaire,
+    state: dict[str, Any],
+    text: str,
+) -> None:
+    if not text or state["status"] not in {"active", "clarify"}:
+        return
+
+    question_id = state["current_question_id"]
+    analysis = await analyze_answer(state, questionnaire, text)
+    transition = questionnaire.transition(question_id, analysis)
+    logger.info(
+        "Answer processed session_id=%s question_id=%s status=%s",
+        state["session_id"],
+        question_id,
+        transition.status,
+    )
+    state["history"].append(
+        {
+            "questionId": question_id,
+            "transcript": text,
+            "analysis": analysis.model_dump(),
+            "transition": transition.status,
+        }
+    )
+    if analysis.normalized_answer:
+        state["answers"][question_id] = analysis.normalized_answer
+    state["status"] = transition.status
+    await socket.send_json(
+        {
+            "type": "answer.processed",
+            "questionId": question_id,
+            "transcript": text,
+            "analysis": analysis.model_dump(),
+            "transition": transition.status,
+        }
+    )
+    if transition.next_question_id:
+        state["current_question_id"] = transition.next_question_id
+        await send_question(socket, questionnaire, state)
+    else:
+        logger.info(
+            "Call ended session_id=%s status=%s",
+            state["session_id"],
+            state["status"],
+        )
+        await socket.send_json({"type": "call.ended", "status": state["status"]})
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     logger.debug("Health check")
@@ -176,8 +227,17 @@ async def call_socket(socket: WebSocket) -> None:
 
     try:
         while True:
-            message = await socket.receive_json()
-            message_type = message.get("type")
+            message = await socket.receive()
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(
+                    code=message.get("code", 1000),
+                    reason=message.get("reason", ""),
+                )
+            text_message = message.get("text")
+            if text_message is None:
+                continue
+            payload = json.loads(text_message)
+            message_type = payload.get("type")
             logger.info(
                 "WebSocket message received session_id=%s message_type=%s",
                 state["session_id"],
@@ -195,48 +255,12 @@ async def call_socket(socket: WebSocket) -> None:
             if message_type != "transcript.final":
                 continue
 
-            text = str(message.get("text", "")).strip()
-            if not text or state["status"] not in {"active", "clarify"}:
-                continue
-            question_id = state["current_question_id"]
-            analysis = await analyze_answer(state, questionnaire, text)
-            transition = questionnaire.transition(question_id, analysis)
-            logger.info(
-                "Answer processed session_id=%s question_id=%s status=%s",
-                state["session_id"],
-                question_id,
-                transition.status,
+            await process_transcript(
+                socket,
+                questionnaire,
+                state,
+                str(payload.get("text", "")).strip(),
             )
-            state["history"].append(
-                {
-                    "questionId": question_id,
-                    "transcript": text,
-                    "analysis": analysis.model_dump(),
-                    "transition": transition.status,
-                }
-            )
-            if analysis.normalized_answer:
-                state["answers"][question_id] = analysis.normalized_answer
-            state["status"] = transition.status
-            await socket.send_json(
-                {
-                    "type": "answer.processed",
-                    "questionId": question_id,
-                    "transcript": text,
-                    "analysis": analysis.model_dump(),
-                    "transition": transition.status,
-                }
-            )
-            if transition.next_question_id:
-                state["current_question_id"] = transition.next_question_id
-                await send_question(socket, questionnaire, state)
-            else:
-                logger.info(
-                    "Call ended session_id=%s status=%s",
-                    state["session_id"],
-                    state["status"],
-                )
-                await socket.send_json({"type": "call.ended", "status": state["status"]})
     except WebSocketDisconnect:
         logger.info("Call session disconnected session_id=%s", state["session_id"])
         return

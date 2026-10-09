@@ -61,6 +61,13 @@ class STTEngine:
             dtype="float32",
             always_2d=False,
         )
+        return self._prepare_audio(audio_array, source_sample_rate)
+
+    def _prepare_audio(
+        self,
+        audio_array: np.ndarray,
+        source_sample_rate: int,
+    ) -> tuple[np.ndarray, int]:
         if audio_array.ndim == 2:
             audio_array = audio_array.mean(axis=1)
 
@@ -72,6 +79,25 @@ class STTEngine:
             ).astype("float32")
 
         return audio_array, TARGET_SAMPLE_RATE
+
+    def _transcribe_array(
+        self,
+        audio_array: np.ndarray,
+        sample_rate: int,
+        return_timestamps: bool,
+    ) -> str | dict[str, Any]:
+        result = self.transcriber(
+            self._make_audio_input(audio_array, sample_rate),
+            return_timestamps=return_timestamps,
+            generate_kwargs={
+                "language": self.language,
+                "task": "transcribe",
+            },
+        )
+
+        if return_timestamps:
+            return result
+        return result["text"].strip()
 
     def _make_audio_input(
         self,
@@ -88,19 +114,7 @@ class STTEngine:
     ) -> str | dict[str, Any]:
         """Transcribe an audio file, optionally returning timestamp chunks."""
         audio_array, sample_rate = self._load_audio(audio_path)
-        result = self.transcriber(
-            self._make_audio_input(audio_array, sample_rate),
-            return_timestamps=return_timestamps,
-            generate_kwargs={
-                "language": self.language,
-                "task": "transcribe",
-            },
-        )
-
-        if return_timestamps:
-            return result
-        return result["text"].strip()
-
+        return self._transcribe_array(audio_array, sample_rate, return_timestamps)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Transcribe a local audio file")

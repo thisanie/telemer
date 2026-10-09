@@ -150,6 +150,7 @@ The LLM may normalize language and extract a candidate answer, but deterministic
 ### Phase 4: Local call simulator
 
 - Build a browser or WebSocket simulator that plays TTS audio and accepts microphone or fixture audio.
+- Use a push-to-talk browser speech-recognition flow with interim text and send the final transcript to the backend; browser recognition may use an online service and requires browser support.
 - Add interruption, silence timeout, retry, and hang-up behavior.
 - Add a session timeline for debugging.
 
